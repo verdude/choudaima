@@ -1,0 +1,95 @@
+*choudaima.txt*                Rewrite Vim text with Codex
+
+=============================================================================
+CONTENTS                                                     *choudaima*
+
+1. Introduction                                      |choudaima-introduction|
+2. Commands                                          |choudaima-commands|
+3. Mappings                                          |choudaima-mappings|
+4. Functions                                         |choudaima-functions|
+5. Configuration                                     |choudaima-configuration|
+
+=============================================================================
+1. Introduction                                *choudaima-introduction*
+
+Choudaima sends a user prompt and linewise source context to `codex exec`.
+Use |:write| in its prompt buffer to submit, or |:quit| with ! to cancel.
+Requests run asynchronously and use text properties to track their targets.
+Changed targets are never overwritten; the returned candidate is preserved in
+a scratch result buffer instead.
+
+Run `codex login` before using Choudaima. By default a ChatGPT login is
+required so usage comes from subscription access rather than separately billed
+API-key access.
+
+=============================================================================
+2. Commands                                      *choudaima-commands*
+
+                                                *:Choudaima*
+:Choudaima             Rewrite the current nonblank paragraph. On blank lines,
+                        use the next paragraph.
+
+:{range}Choudaima     Rewrite complete lines in {range}.
+
+                                                *:ChoudaimaRequests*
+:ChoudaimaRequests     List active request IDs and their tracked ranges.
+
+                                                *:ChoudaimaCancel*
+:ChoudaimaCancel {id}  Cancel one request.
+:ChoudaimaCancel all   Cancel all requests targeting the current source buffer.
+
+                                                *:ChoudaimaHealth*
+:ChoudaimaHealth       Check the Codex executable, login, and configured auth
+                        requirement.
+
+=============================================================================
+3. Mappings                                      *choudaima-mappings*
+
+No user keys are mapped automatically. Define normal and Visual mappings:
+>
+  nmap <leader>cr <Plug>(choudaima-rewrite)
+  xmap <leader>cr <Plug>(choudaima-rewrite)
+<
+The Visual mapping expands all selection types to complete lines.
+
+=============================================================================
+4. Functions                                      *choudaima-functions*
+
+choudaima#start({line1}, {line2}, {has_range})        *choudaima#start()*
+        Open a prompt. When {has_range} is TRUE, use complete lines {line1}
+        through {line2}. Otherwise use the current or next paragraph.
+
+The command implementations also expose choudaima#cancel(),
+choudaima#requests(), and choudaima#health(). Prefer their Ex commands for
+interactive use.
+
+=============================================================================
+5. Configuration                           *choudaima-configuration*
+
+                                        *g:choudaima_codex_command*
+g:choudaima_codex_command
+        Codex executable name or path. Default: "codex".
+
+                                        *g:choudaima_model*
+g:choudaima_model
+        Model override. Empty inherits the user's Codex configuration.
+
+                                        *g:choudaima_use_subscription*
+g:choudaima_use_subscription
+        Boolean. TRUE requires ChatGPT subscription authentication; FALSE
+        requires API-key authentication. A mismatch stops the request.
+
+                                        *g:choudaima_prompt_height*
+g:choudaima_prompt_height
+        Height of the prompt split. Default: 7.
+
+                                        *g:choudaima_context_max_bytes*
+g:choudaima_context_max_bytes
+        Whole-buffer context cap. Default: 262144.
+
+                                        *g:choudaima_context_lines*
+g:choudaima_context_lines
+        Surrounding lines sent when the whole buffer exceeds the cap.
+        Default: 100.
+
+vim:tw=78:ts=8:noet:ft=help:norl:
