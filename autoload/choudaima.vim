@@ -1,5 +1,3 @@
-" Core implementation for choudaima.vim.
-
 let s:root = fnamemodify(resolve(expand('<sfile>:p')), ':h:h')
 let s:schema_path = s:root . '/schemas/replacement.json'
 let s:start_prop = 'choudaima_range_start'
@@ -174,6 +172,7 @@ function! choudaima#start(line1, line2, has_range) abort
         \ 'marker_id': marker_id,
         \ }
   let b:choudaima_prompt = 1
+  execute 'autocmd choudaima_prompt_buffers BufWriteCmd <buffer=' . prompt_buf . '> call choudaima#submit_prompt(' . prompt_buf . ')'
   execute 'silent file ' . fnameescape('[Choudaima Prompt #' . marker_id . ']')
   setlocal buftype=acwrite
   setlocal bufhidden=wipe

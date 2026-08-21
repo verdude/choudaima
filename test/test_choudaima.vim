@@ -13,6 +13,15 @@ let g:choudaima_codex_command = fnamemodify('test/fake_codex.sh', ':p')
 let g:choudaima_use_subscription = v:true
 let g:choudaima_prompt_height = 2
 
+" Loading Choudaima must not intercept writes to ordinary file buffers.
+let s:ordinary_path = s:tmp . '/ordinary.txt'
+call writefile(['before'], s:ordinary_path)
+execute 'edit ' . fnameescape(s:ordinary_path)
+call setline(1, 'after')
+write
+call assert_equal(['after'], readfile(s:ordinary_path))
+bwipeout!
+
 function! s:write_response(id, lines, ...) abort
   let delay = a:0 ? a:1 : 0
   call writefile([json_encode({'replacement_lines': a:lines})], s:tmp . '/' . a:id . '.json')

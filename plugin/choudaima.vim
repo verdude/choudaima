@@ -1,5 +1,3 @@
-" choudaima.vim - linewise rewriting with Codex
-
 if exists('g:loaded_choudaima')
   finish
 endif
@@ -30,7 +28,5 @@ xnoremap <silent> <Plug>(choudaima-rewrite) :<C-U>call choudaima#start(line("'<"
 
 augroup choudaima_prompt_buffers
   autocmd!
-  autocmd BufWriteCmd * if getbufvar(str2nr(expand('<abuf>')), 'choudaima_prompt', 0) | call choudaima#submit_prompt(str2nr(expand('<abuf>'))) | endif
   autocmd BufWipeout * call choudaima#discard_prompt(str2nr(expand('<abuf>')))
 augroup END
-
