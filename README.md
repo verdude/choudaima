@@ -25,8 +25,8 @@ let g:choudaima_use_subscription = v:false
 
 1. Invoke `<Plug>(choudaima-rewrite)` or `:Choudaima`.
 2. Enter a multiline instruction in the bottom scratch split.
-3. Use `:write` or `:wq` to submit. Use `:q!` to cancel the draft.
-4. Continue editing while Codex works asynchronously.
+3. Use `:write` or `:wq` to submit. Authentication is checked in the background; the prompt is temporarily locked but Vim remains responsive.
+4. A successful check closes the prompt and starts the rewrite. Use `:q!` while the check is pending to cancel the draft.
 
 Visual selections are expanded to complete lines. Without a range, Choudaima uses the contiguous nonblank paragraph under the cursor, or the next paragraph when the cursor is on blank lines.
 
@@ -39,7 +39,7 @@ Each request is assigned an ID. Non-overlapping requests in the same buffer may 
 - `:ChoudaimaRequests` lists active request IDs.
 - `:ChoudaimaCancel {id}` cancels one request.
 - `:ChoudaimaCancel all` cancels requests targeting the current buffer.
-- `:ChoudaimaHealth` checks the executable and required authentication mode.
+- `:ChoudaimaHealth` checks the executable and required authentication mode asynchronously.
 
 ## Configuration
 

@@ -1,6 +1,12 @@
 #!/bin/sh
 
 if [ "$1" = "login" ] && [ "$2" = "status" ]; then
+  if [ -n "${CHOUDAIMA_FAKE_AUTH_LOG:-}" ]; then
+    printf '%s\n' "check" >> "$CHOUDAIMA_FAKE_AUTH_LOG"
+  fi
+  if [ -n "${CHOUDAIMA_FAKE_AUTH_DELAY:-}" ]; then
+    sleep "$CHOUDAIMA_FAKE_AUTH_DELAY"
+  fi
   case "${CHOUDAIMA_FAKE_AUTH:-chatgpt}" in
     chatgpt)
       echo "Logged in using ChatGPT"
@@ -51,4 +57,3 @@ if [ -n "${CHOUDAIMA_FAKE_RESPONSES_DIR:-}" ]; then
 fi
 
 printf '%s\n' "${CHOUDAIMA_FAKE_RESPONSE:-{\"replacement_lines\":[\"replacement\"]}}"
-

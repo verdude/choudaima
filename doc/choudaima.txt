@@ -14,9 +14,10 @@ CONTENTS                                                     *choudaima*
 
 Choudaima sends a user prompt and linewise source context to `codex exec`.
 Use |:write| in its prompt buffer to submit, or |:quit| with ! to cancel.
-Requests run asynchronously and use text properties to track their targets.
-Changed targets are never overwritten; the returned candidate is preserved in
-a scratch result buffer instead.
+Authentication checks and requests run asynchronously. The prompt is locked
+while authentication is checked, but Vim remains responsive. Text properties
+track request targets. Changed targets are never overwritten; the returned
+candidate is preserved in a scratch result buffer instead.
 
 Run `codex login` before using Choudaima. By default a ChatGPT login is
 required so usage comes from subscription access rather than separately billed
@@ -40,7 +41,7 @@ API-key access.
 
                                                 *:ChoudaimaHealth*
 :ChoudaimaHealth       Check the Codex executable, login, and configured auth
-                        requirement.
+                        requirement asynchronously.
 
 =============================================================================
 3. Mappings                                      *choudaima-mappings*

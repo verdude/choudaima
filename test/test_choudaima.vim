@@ -9,6 +9,8 @@ let s:tmp = tempname()
 call mkdir(s:tmp, 'p')
 let $CHOUDAIMA_FAKE_RESPONSES_DIR = s:tmp
 let $CHOUDAIMA_FAKE_AUTH = 'chatgpt'
+let $CHOUDAIMA_FAKE_AUTH_DELAY = ''
+let $CHOUDAIMA_FAKE_AUTH_LOG = ''
 let g:choudaima_codex_command = fnamemodify('test/fake_codex.sh', ':p')
 let g:choudaima_use_subscription = v:true
 let g:choudaima_prompt_height = 2
@@ -67,6 +69,18 @@ function! s:wait_for_result(id, timeout_ms) abort
   return -1
 endfunction
 
+function! s:wait_for_message(pattern, timeout_ms) abort
+  let waited = 0
+  while waited < a:timeout_ms
+    if execute('messages') =~# a:pattern
+      return v:true
+    endif
+    sleep 10m
+    let waited += 10
+  endwhile
+  return v:false
+endfunction
+
 call assert_equal(2, exists(':Choudaima'))
 call assert_equal(2, exists(':ChoudaimaCancel'))
 call assert_match('Choudaima', maparg('<Plug>(choudaima-rewrite)', 'n'))
@@ -82,8 +96,19 @@ call s:write_response(1, ['THIRD', 'FOURTH', 'FIFTH'])
 call choudaima#start(0, 0, 0)
 let s:prompt1 = bufnr('%')
 call setline(1, 'uppercase and add a line')
-call choudaima#submit_prompt(s:prompt1)
+let s:auth_log1 = s:tmp . '/auth-1.log'
+let $CHOUDAIMA_FAKE_AUTH_LOG = s:auth_log1
+let $CHOUDAIMA_FAKE_AUTH_DELAY = '0.50'
+let s:auth_started = reltime()
+write
+call assert_true(reltimefloat(reltime(s:auth_started)) < 0.35)
+call assert_equal(0, getbufvar(s:prompt1, '&modifiable'))
+call assert_true(getbufvar(s:prompt1, 'choudaima_auth_pending'))
+write
 call assert_true(s:wait_for_buffer_line(s:source1, 4, 'THIRD', 2000))
+call assert_equal(['check'], readfile(s:auth_log1))
+let $CHOUDAIMA_FAKE_AUTH_LOG = ''
+let $CHOUDAIMA_FAKE_AUTH_DELAY = ''
 call assert_equal(['first', 'second', '', 'THIRD', 'FOURTH', 'FIFTH'], getbufline(s:source1, 1, '$'))
 let s:context1 = json_decode(join(readfile(s:tmp . '/1.stdin'), "\n"))
 call assert_equal('whole_buffer', s:context1.context.mode)
@@ -148,11 +173,32 @@ call choudaima#start(1, 1, 1)
 let s:auth_prompt = bufnr('%')
 call setline(1, 'should not submit')
 call choudaima#submit_prompt(s:auth_prompt)
+let s:waited = 0
+while !getbufvar(s:auth_prompt, '&modifiable') && s:waited < 2000
+  sleep 10m
+  let s:waited += 10
+endwhile
 call assert_true(bufexists(s:auth_prompt))
+call assert_equal(1, getbufvar(s:auth_prompt, '&modifiable'))
 call assert_equal(1, getbufvar(s:auth_prompt, '&modified'))
 call choudaima#discard_prompt(s:auth_prompt)
 execute 'silent! bwipeout! ' . s:auth_prompt
 let $CHOUDAIMA_FAKE_AUTH = 'chatgpt'
+
+" Cancelling a prompt while authentication is pending stops before request #6.
+execute 'buffer ' . s:source4
+let $CHOUDAIMA_FAKE_AUTH_DELAY = '0.30'
+call choudaima#start(1, 1, 1)
+let s:cancel_auth_prompt = bufnr('%')
+call setline(1, 'never submit')
+call choudaima#submit_prompt(s:cancel_auth_prompt)
+call assert_equal(0, getbufvar(s:cancel_auth_prompt, '&modifiable'))
+quit!
+sleep 400m
+call assert_false(bufexists(s:cancel_auth_prompt))
+call assert_false(filereadable(s:tmp . '/6.stdin'))
+call assert_equal(['keep'], getbufline(s:source4, 1))
+let $CHOUDAIMA_FAKE_AUTH_DELAY = ''
 
 " Request #6: cancellation by ID prevents application.
 execute 'buffer ' . s:source4
@@ -194,12 +240,14 @@ call assert_false(bufexists(s:write_prompt))
 
 execute 'buffer ' . s:source5
 call s:write_response(10, ['WQ'])
+let $CHOUDAIMA_FAKE_AUTH_DELAY = '0.20'
 call choudaima#start(3, 3, 1)
 let s:wq_prompt = bufnr('%')
 call setline(1, 'submit with wq')
 wq
 call assert_true(s:wait_for_buffer_line(s:source5, 3, 'WQ', 2000))
 call assert_false(bufexists(s:wq_prompt))
+let $CHOUDAIMA_FAKE_AUTH_DELAY = ''
 
 " Request #11: API-key-only mode accepts API-key auth.
 let $CHOUDAIMA_FAKE_AUTH = 'apikey'
@@ -263,6 +311,35 @@ let s:context17 = json_decode(join(readfile(s:tmp . '/17.stdin'), "\n"))
 call assert_equal(fnamemodify(s:project . '/sample.py', ':p'), s:context17.filepath)
 call assert_equal('python', s:context17.filetype)
 call assert_equal(fnamemodify(s:project, ':p'), fnamemodify(s:context17.project_root, ':p'))
+
+" Health checks return immediately, deduplicate, and report asynchronously.
+let s:health_auth_log = s:tmp . '/health-auth.log'
+let $CHOUDAIMA_FAKE_AUTH_LOG = s:health_auth_log
+let $CHOUDAIMA_FAKE_AUTH_DELAY = '0.50'
+let s:health_started = reltime()
+call choudaima#health()
+call choudaima#health()
+call assert_true(reltimefloat(reltime(s:health_started)) < 0.35)
+call assert_match('authentication check already in progress', execute('messages'))
+call assert_true(s:wait_for_message('healthy: Codex is authenticated with ChatGPT', 2000))
+call assert_equal(['check'], readfile(s:health_auth_log))
+let $CHOUDAIMA_FAKE_AUTH_LOG = ''
+let $CHOUDAIMA_FAKE_AUTH_DELAY = ''
+
+let s:invalid_health_log = s:tmp . '/invalid-health-auth.log'
+let $CHOUDAIMA_FAKE_AUTH_LOG = s:invalid_health_log
+let g:choudaima_use_subscription = 'invalid'
+call choudaima#health()
+sleep 20m
+call assert_false(filereadable(s:invalid_health_log))
+call assert_match('g:choudaima_use_subscription must be boolean', execute('messages'))
+let g:choudaima_use_subscription = v:true
+let $CHOUDAIMA_FAKE_AUTH_LOG = ''
+
+let $CHOUDAIMA_FAKE_AUTH = 'none'
+call choudaima#health()
+call assert_true(s:wait_for_message('Codex authentication check failed: Not logged in', 2000))
+let $CHOUDAIMA_FAKE_AUTH = 'chatgpt'
 
 call delete(s:tmp, 'rf')
 

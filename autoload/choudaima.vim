@@ -4,8 +4,13 @@ let s:start_prop = 'choudaima_range_start'
 let s:end_prop = 'choudaima_range_end'
 let s:drafts = {}
 let s:requests_by_id = {}
+let s:auth_checks_by_id = {}
 let s:next_marker_id = 1
 let s:next_request_id = 1
+let s:next_auth_check_id = 1
+let s:health_auth_check_id = 0
+let s:prompt_statusline = ' Choudaima prompt — :write submits, :q! cancels '
+let s:auth_statusline = ' Choudaima prompt — checking authentication, :q! cancels '
 
 function! s:warn(message) abort
   echohl WarningMsg
@@ -170,6 +175,7 @@ function! choudaima#start(line1, line2, has_range) abort
   let s:drafts[string(prompt_buf)] = {
         \ 'source_buf': source,
         \ 'marker_id': marker_id,
+        \ 'auth_check_id': 0,
         \ }
   let b:choudaima_prompt = 1
   execute 'autocmd choudaima_prompt_buffers BufWriteCmd <buffer=' . prompt_buf . '> call choudaima#submit_prompt(' . prompt_buf . ')'
@@ -181,7 +187,7 @@ function! choudaima#start(line1, line2, has_range) abort
   setlocal modifiable
   setlocal wrap
   setlocal filetype=choudaima
-  let &l:statusline = ' Choudaima prompt — :write submits, :q! cancels '
+  let &l:statusline = s:prompt_statusline
   call setline(1, '')
   setlocal nomodified
   startinsert
@@ -199,6 +205,9 @@ function! choudaima#discard_prompt(prompt_buf) abort
     return
   endif
   let draft = remove(s:drafts, key)
+  if get(draft, 'auth_check_id', 0) > 0
+    call s:cancel_auth_check(draft.auth_check_id)
+  endif
   call s:remove_markers(draft.source_buf, draft.marker_id)
 endfunction
 
@@ -215,60 +224,167 @@ function! s:codex_executable() abort
   return command
 endfunction
 
-function! s:auth_status(command) abort
-  " systemlist() does not accept an argv List in every Vim 9.1 build.
-  " shellescape() keeps the configured executable a single trusted argv item.
-  let output = systemlist(shellescape(a:command) . ' login status')
-  let status = v:shell_error
-  let text = join(output, "\n")
-  let mode = text =~? 'ChatGPT' ? 'chatgpt' : text =~? 'API[ -]\?key\|apikey' ? 'apikey' : 'unknown'
-  return {'ok': status == 0, 'mode': mode, 'text': text, 'status': status}
-endfunction
-
-function! s:check_auth(command, noisy) abort
-  let auth = s:auth_status(a:command)
-  if !auth.ok
-    if a:noisy
-      call s:error('could not verify Codex authentication' . (empty(auth.text) ? '' : ': ' . auth.text))
-    endif
-    return v:false
-  endif
+function! s:expected_auth_mode(noisy) abort
   let require_subscription = get(g:, 'choudaima_use_subscription', v:true)
   if type(require_subscription) != v:t_bool && type(require_subscription) != v:t_number
     if a:noisy
       call s:error('g:choudaima_use_subscription must be boolean')
     endif
-    return v:false
+    return ''
   endif
-  let expected = require_subscription ? 'chatgpt' : 'apikey'
-  if auth.mode !=# expected
-    if a:noisy
-      let label = expected ==# 'chatgpt' ? 'ChatGPT subscription' : 'API key'
-      call s:warn('authentication mismatch: configured for ' . label . '. Run `codex logout`, then `codex login` with the required method')
-    endif
-    return v:false
+  return require_subscription ? 'chatgpt' : 'apikey'
+endfunction
+
+function! s:auth_label(mode) abort
+  return a:mode ==# 'chatgpt' ? 'ChatGPT subscription' : 'API key'
+endfunction
+
+function! s:parse_auth_result(status, stdout, stderr) abort
+  let stdout = trim(a:stdout)
+  let stderr = trim(a:stderr)
+  let text = empty(stdout) ? stderr : empty(stderr) ? stdout : stdout . "\n" . stderr
+  let mode = text =~? 'ChatGPT' ? 'chatgpt' : text =~? 'API[ -]\?key\|apikey' ? 'apikey' : 'unknown'
+  return {'ok': a:status == 0, 'mode': mode, 'text': text, 'status': a:status}
+endfunction
+
+function! s:auth_job_output(check_id, stream, channel, message) abort
+  let key = string(a:check_id)
+  if !has_key(s:auth_checks_by_id, key) || empty(a:message)
+    return
   endif
-  return v:true
+  let s:auth_checks_by_id[key][a:stream] .= a:message
+endfunction
+
+function! s:start_auth_check(command, kind, data) abort
+  let check_id = s:next_auth_check_id
+  let s:next_auth_check_id += 1
+  let key = string(check_id)
+  let check = {
+        \ 'id': check_id,
+        \ 'kind': a:kind,
+        \ 'stdout': '',
+        \ 'stderr': '',
+        \ 'job': v:null,
+        \ }
+  call extend(check, a:data)
+  let s:auth_checks_by_id[key] = check
+  try
+    let job = job_start([a:command, 'login', 'status'], {
+          \ 'in_io': 'null',
+          \ 'out_mode': 'raw',
+          \ 'err_mode': 'raw',
+          \ 'out_cb': function('s:auth_job_output', [check_id, 'stdout']),
+          \ 'err_cb': function('s:auth_job_output', [check_id, 'stderr']),
+          \ 'exit_cb': function('s:auth_job_exit', [check_id]),
+          \ })
+  catch
+    call remove(s:auth_checks_by_id, key)
+    return 0
+  endtry
+  if job_status(job) ==# 'fail'
+    call remove(s:auth_checks_by_id, key)
+    return 0
+  endif
+  let s:auth_checks_by_id[key].job = job
+  return check_id
+endfunction
+
+function! s:cancel_auth_check(check_id) abort
+  let key = string(a:check_id)
+  if !has_key(s:auth_checks_by_id, key)
+    return
+  endif
+  let check = remove(s:auth_checks_by_id, key)
+  if check.kind ==# 'health' && s:health_auth_check_id == a:check_id
+    let s:health_auth_check_id = 0
+  endif
+  if type(check.job) == v:t_job && job_status(check.job) ==# 'run'
+    call job_stop(check.job, 'term')
+  endif
+endfunction
+
+function! s:set_prompt_auth_pending(prompt_buf, pending) abort
+  if !bufexists(a:prompt_buf)
+    return
+  endif
+  call setbufvar(a:prompt_buf, 'choudaima_auth_pending', a:pending)
+  call setbufvar(a:prompt_buf, '&modifiable', a:pending ? 0 : 1)
+  call setbufvar(a:prompt_buf, '&statusline', a:pending ? s:auth_statusline : s:prompt_statusline)
+  if !a:pending
+    call setbufvar(a:prompt_buf, '&modified', 1)
+  endif
+endfunction
+
+function! s:submission_auth_done(check, auth) abort
+  let prompt_buf = a:check.prompt_buf
+  let draft_key = string(prompt_buf)
+  if !has_key(s:drafts, draft_key) || get(s:drafts[draft_key], 'auth_check_id', 0) != a:check.id
+    return
+  endif
+  let s:drafts[draft_key].auth_check_id = 0
+  if !a:auth.ok
+    call s:set_prompt_auth_pending(prompt_buf, v:false)
+    call s:error('could not verify Codex authentication' . (empty(a:auth.text) ? '' : ': ' . a:auth.text))
+    return
+  endif
+  if a:auth.mode !=# a:check.expected
+    call s:set_prompt_auth_pending(prompt_buf, v:false)
+    call s:warn('authentication mismatch: configured for ' . s:auth_label(a:check.expected) . '. Run `codex logout`, then `codex login` with the required method')
+    return
+  endif
+  call s:start_rewrite(prompt_buf, a:check.user_prompt, a:check.command, a:check.model)
+endfunction
+
+function! s:health_auth_done(check, auth) abort
+  if s:health_auth_check_id == a:check.id
+    let s:health_auth_check_id = 0
+  endif
+  if !a:auth.ok
+    call s:error('Codex authentication check failed' . (empty(a:auth.text) ? '' : ': ' . a:auth.text))
+    return
+  endif
+  if a:auth.mode !=# a:check.expected
+    call s:warn('Codex is reachable, but the active authentication does not match required mode: ' . s:auth_label(a:check.expected))
+    return
+  endif
+  call s:info('healthy: Codex is authenticated with ' . (a:auth.mode ==# 'chatgpt' ? 'ChatGPT' : 'an API key'))
+endfunction
+
+function! s:auth_job_exit(check_id, job, status) abort
+  let key = string(a:check_id)
+  if !has_key(s:auth_checks_by_id, key)
+    return
+  endif
+  let check = remove(s:auth_checks_by_id, key)
+  let auth = s:parse_auth_result(a:status, check.stdout, check.stderr)
+  if check.kind ==# 'submit'
+    call s:submission_auth_done(check, auth)
+  else
+    call s:health_auth_done(check, auth)
+  endif
 endfunction
 
 function! choudaima#health() abort
+  if s:health_auth_check_id > 0 && has_key(s:auth_checks_by_id, string(s:health_auth_check_id))
+    call s:warn('Codex authentication check already in progress')
+    return
+  endif
+  let s:health_auth_check_id = 0
   let command = s:codex_executable()
   if empty(command)
     return
   endif
-  let auth = s:auth_status(command)
-  if !auth.ok
-    call s:error('Codex authentication check failed' . (empty(auth.text) ? '' : ': ' . auth.text))
+  let expected = s:expected_auth_mode(v:true)
+  if empty(expected)
     return
   endif
-  let require_subscription = get(g:, 'choudaima_use_subscription', v:true)
-  let expected = require_subscription ? 'chatgpt' : 'apikey'
-  if auth.mode !=# expected
-    let label = expected ==# 'chatgpt' ? 'ChatGPT subscription' : 'API key'
-    call s:warn('Codex is reachable, but the active authentication does not match required mode: ' . label)
+  let check_id = s:start_auth_check(command, 'health', {'expected': expected})
+  if check_id == 0
+    call s:error('could not start Codex authentication check')
     return
   endif
-  call s:info('healthy: Codex is authenticated with ' . (auth.mode ==# 'chatgpt' ? 'ChatGPT' : 'an API key'))
+  let s:health_auth_check_id = check_id
+  call s:info('checking Codex authentication...')
 endfunction
 
 function! s:buffer_identity(bufnr) abort
@@ -485,24 +601,13 @@ function! s:job_exit(request_id, job, status) abort
   call s:info('request #' . request.id . ' applied to ' . request.filepath)
 endfunction
 
-function! choudaima#submit_prompt(prompt_buf) abort
+function! s:start_rewrite(prompt_buf, user_prompt, command, model) abort
   let draft_key = string(a:prompt_buf)
   if !has_key(s:drafts, draft_key)
-    call s:error('this prompt is no longer attached to a source range')
-    return
-  endif
-  let prompt_lines = getbufline(a:prompt_buf, 1, '$')
-  let user_prompt = join(prompt_lines, "\n")
-  if user_prompt !~# '\S'
-    call s:warn('the prompt is empty')
-    return
-  endif
-
-  let command = s:codex_executable()
-  if empty(command) || !s:check_auth(command, v:true)
     return
   endif
   if !filereadable(s:schema_path)
+    call s:set_prompt_auth_pending(a:prompt_buf, v:false)
     call s:error('response schema is missing: ' . s:schema_path)
     return
   endif
@@ -523,7 +628,7 @@ function! choudaima#submit_prompt(prompt_buf) abort
   let context = s:context_document(request_id, draft.source_buf, current_range[0], current_range[1], root)
 
   let args = [
-        \ command,
+        \ a:command,
         \ 'exec',
         \ '--ephemeral',
         \ '--sandbox', 'read-only',
@@ -532,15 +637,10 @@ function! choudaima#submit_prompt(prompt_buf) abort
         \ '--cd', root,
         \ '--skip-git-repo-check',
         \ ]
-  let model = get(g:, 'choudaima_model', '')
-  if type(model) != v:t_string
-    call s:error('g:choudaima_model must be a string')
-    return
+  if !empty(a:model)
+    call extend(args, ['--model', a:model])
   endif
-  if !empty(model)
-    call extend(args, ['--model', model])
-  endif
-  call add(args, s:instruction(user_prompt))
+  call add(args, s:instruction(a:user_prompt))
 
   let request = {
         \ 'id': request_id,
@@ -568,6 +668,7 @@ function! choudaima#submit_prompt(prompt_buf) abort
         \ })
   if job_status(job) ==# 'fail'
     call remove(s:requests_by_id, request_key)
+    call s:set_prompt_auth_pending(a:prompt_buf, v:false)
     call s:error('could not start Codex')
     return
   endif
@@ -579,6 +680,7 @@ function! choudaima#submit_prompt(prompt_buf) abort
   catch
     call remove(s:requests_by_id, request_key)
     call job_stop(job, 'term')
+    call s:set_prompt_auth_pending(a:prompt_buf, v:false)
     call s:error('could not send context to Codex: ' . v:exception)
     return
   endtry
@@ -587,6 +689,67 @@ function! choudaima#submit_prompt(prompt_buf) abort
   call setbufvar(a:prompt_buf, '&modified', 0)
   call timer_start(0, function('s:close_prompt', [a:prompt_buf]))
   call s:info('submitted request #' . request_id . ' (' . context.mode . ')')
+endfunction
+
+function! choudaima#submit_prompt(prompt_buf) abort
+  let draft_key = string(a:prompt_buf)
+  if !has_key(s:drafts, draft_key)
+    call s:error('this prompt is no longer attached to a source range')
+    return
+  endif
+  if get(s:drafts[draft_key], 'auth_check_id', 0) > 0
+    call s:warn('authentication check already in progress for this prompt')
+    return
+  endif
+
+  let prompt_lines = getbufline(a:prompt_buf, 1, '$')
+  let user_prompt = join(prompt_lines, "\n")
+  if user_prompt !~# '\S'
+    call s:warn('the prompt is empty')
+    return
+  endif
+
+  let command = s:codex_executable()
+  if empty(command)
+    return
+  endif
+  let expected = s:expected_auth_mode(v:true)
+  if empty(expected)
+    return
+  endif
+  if !filereadable(s:schema_path)
+    call s:error('response schema is missing: ' . s:schema_path)
+    return
+  endif
+  let model = get(g:, 'choudaima_model', '')
+  if type(model) != v:t_string
+    call s:error('g:choudaima_model must be a string')
+    return
+  endif
+
+  let draft = s:drafts[draft_key]
+  let current_range = s:resolve_markers(draft.source_buf, draft.marker_id)
+  if empty(current_range)
+    call s:error('the selected source range no longer exists')
+    call choudaima#discard_prompt(a:prompt_buf)
+    call timer_start(0, function('s:close_prompt', [a:prompt_buf]))
+    return
+  endif
+
+  let check_id = s:start_auth_check(command, 'submit', {
+        \ 'prompt_buf': a:prompt_buf,
+        \ 'expected': expected,
+        \ 'user_prompt': user_prompt,
+        \ 'command': command,
+        \ 'model': model,
+        \ })
+  if check_id == 0
+    call s:error('could not start Codex authentication check')
+    return
+  endif
+  let s:drafts[draft_key].auth_check_id = check_id
+  call s:set_prompt_auth_pending(a:prompt_buf, v:true)
+  call s:info('checking Codex authentication...')
 endfunction
 
 function! s:source_for_current_buffer() abort
